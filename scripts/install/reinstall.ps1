@@ -14,12 +14,48 @@ function Write-Step {
 
 function Assert-Command {
     param(
-        [string]$Name
+        [string]$Name,
+        [string[]]$FallbackPaths = @()
     )
 
-    if ($null -eq (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        throw "Missing required command: $Name"
+    $command = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $command) {
+        return $command.Source
     }
+
+    foreach ($path in $FallbackPaths) {
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            continue
+        }
+
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $path).Path
+        }
+    }
+
+    if ($FallbackPaths.Count -gt 0) {
+        $fallbackSummary = ($FallbackPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ", "
+        throw "Missing required command: $Name. Also checked: $fallbackSummary"
+    }
+
+        throw "Missing required command: $Name"
+}
+
+function Add-DirectoryToPath {
+    param(
+        [string]$Directory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
+        return
+    }
+
+    $pathEntries = $env:PATH -split ";"
+    if ($pathEntries -contains $Directory) {
+        return
+    }
+
+    $env:PATH = "$Directory;$env:PATH"
 }
 
 $scriptDir = Split-Path -Parent $PSCommandPath
@@ -30,11 +66,16 @@ if (-not (Test-Path -LiteralPath $codexRsDir -PathType Container)) {
     throw "Could not find codex-rs workspace at: $codexRsDir"
 }
 
-Assert-Command -Name "cargo"
-Assert-Command -Name "npm"
-Assert-Command -Name "node"
+$cargoPath = Assert-Command -Name "cargo" -FallbackPaths @(
+    $(if (-not [string]::IsNullOrWhiteSpace($env:CARGO_HOME)) { Join-Path $env:CARGO_HOME "bin\cargo.exe" }),
+    $(if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe" })
+)
+$npmPath = Assert-Command -Name "npm"
+$nodePath = Assert-Command -Name "node"
 
-$arch = (& node -p "process.arch").Trim()
+Add-DirectoryToPath -Directory (Split-Path -Parent $cargoPath)
+
+$arch = (& $nodePath -p "process.arch").Trim()
 switch ($arch) {
     "x64" {
         $platformPackage = "codex-win32-x64"
@@ -49,7 +90,7 @@ switch ($arch) {
     }
 }
 
-$npmRoot = (& npm root -g).Trim()
+$npmRoot = (& $npmPath root -g).Trim()
 if ([string]::IsNullOrWhiteSpace($npmRoot)) {
     throw "npm global root is empty."
 }
@@ -77,7 +118,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($env:CARGO_BUILD_JOBS)) {
         $env:CARGO_BUILD_JOBS = "1"
     }
-    cargo build --locked -p codex-cli --release
+    & $cargoPath build --locked -p codex-cli --release
 } finally {
     Pop-Location
 }
