@@ -24,13 +24,13 @@ use std::fmt;
 use std::time::Duration;
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
-const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
-const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
+const DEFAULT_STREAM_MAX_RETRIES: u64 = 1000;
+const DEFAULT_REQUEST_MAX_RETRIES: u64 = 1000;
 pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 /// Hard cap for user-configured `stream_max_retries`.
-const MAX_STREAM_MAX_RETRIES: u64 = 100;
+const MAX_STREAM_MAX_RETRIES: u64 = 1000;
 /// Hard cap for user-configured `request_max_retries`.
-const MAX_REQUEST_MAX_RETRIES: u64 = 100;
+const MAX_REQUEST_MAX_RETRIES: u64 = 1000;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
@@ -256,7 +256,7 @@ impl ModelProviderInfo {
         let headers = self.build_header_map()?;
         let retry = ApiRetryConfig {
             max_attempts: self.request_max_retries(),
-            base_delay: Duration::from_millis(200),
+            base_delay: Duration::from_millis(20),
             retry_429: false,
             retry_5xx: true,
             retry_transport: true,

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use crate::Prompt;
@@ -17,7 +18,6 @@ use crate::session::PreviousTurnSettings;
 use crate::session::session::Session;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
-use crate::util::backoff;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
@@ -300,7 +300,7 @@ async fn run_compact_task_inner_impl(
             Err(e) => {
                 if retries < max_retries {
                     retries += 1;
-                    let delay = backoff(retries);
+                    let delay = Duration::from_millis(20);
                     sess.notify_stream_error(
                         turn_context.as_ref(),
                         format!("Reconnecting... {retries}/{max_retries}"),

@@ -3,6 +3,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use pretty_assertions::assert_eq;
 use std::num::NonZeroU64;
+use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
@@ -146,6 +147,32 @@ fn test_personal_access_token_uses_chatgpt_codex_base_url() {
         .expect("OpenAI provider should build API provider");
 
     assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+}
+
+#[test]
+fn default_retry_settings_use_fixed_fast_retry_budget() {
+    let provider = ModelProviderInfo::default();
+    let api_provider = provider
+        .to_api_provider(/*auth_mode*/ None)
+        .expect("default provider should build API provider");
+
+    assert_eq!(provider.request_max_retries(), 1000);
+    assert_eq!(provider.stream_max_retries(), 1000);
+    assert_eq!(api_provider.retry.max_attempts, 1000);
+    assert_eq!(api_provider.retry.base_delay, Duration::from_millis(20));
+    assert!(!api_provider.retry.retry_429);
+}
+
+#[test]
+fn configured_retry_settings_are_capped_at_one_thousand() {
+    let provider = ModelProviderInfo {
+        request_max_retries: Some(1001),
+        stream_max_retries: Some(1001),
+        ..ModelProviderInfo::default()
+    };
+
+    assert_eq!(provider.request_max_retries(), 1000);
+    assert_eq!(provider.stream_max_retries(), 1000);
 }
 
 #[test]

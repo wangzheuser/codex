@@ -1,6 +1,5 @@
 use crate::error::TransportError;
 use crate::request::Request;
-use rand::Rng;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -35,15 +34,9 @@ impl RetryOn {
     }
 }
 
-pub fn backoff(base: Duration, attempt: u64) -> Duration {
-    if attempt == 0 {
-        return base;
-    }
-    let exp = 2u64.saturating_pow(attempt as u32 - 1);
-    let millis = base.as_millis() as u64;
-    let raw = millis.saturating_mul(exp);
-    let jitter: f64 = rand::rng().random_range(0.9..1.1);
-    Duration::from_millis((raw as f64 * jitter) as u64)
+/// Returns the fixed retry delay used between attempts.
+pub fn backoff(base: Duration, _attempt: u64) -> Duration {
+    base
 }
 
 pub async fn run_with_retry<T, F, Fut>(
@@ -70,4 +63,18 @@ where
         }
     }
     Err(TransportError::RetryLimit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_returns_fixed_base_delay_for_every_attempt() {
+        let base = Duration::from_millis(20);
+
+        for attempt in [0, 1, 2, 10, 1000] {
+            assert_eq!(backoff(base, attempt), base);
+        }
+    }
 }
