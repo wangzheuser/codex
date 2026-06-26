@@ -2,6 +2,8 @@
 
 set -eu
 
+build_profile="${CODEX_REINSTALL_PROFILE:-dev-small}"
+
 step() {
   printf '==> %s\n' "$1"
 }
@@ -18,9 +20,45 @@ require_command() {
   fi
 }
 
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --profile)
+        if [ "$#" -lt 2 ]; then
+          fail "--profile requires a value"
+        fi
+        build_profile="$2"
+        shift
+        ;;
+      --release)
+        build_profile="release"
+        ;;
+      --help|-h)
+        cat <<EOF
+Usage: reinstall.sh [--profile PROFILE] [--release]
+
+Defaults:
+  PROFILE defaults to dev-small for faster local rebuilds.
+
+Environment:
+  CODEX_REINSTALL_PROFILE  Build profile to use.
+  CARGO_BUILD_JOBS         Optional Cargo parallelism override.
+EOF
+        exit 0
+        ;;
+      *)
+        fail "Unknown argument: $1"
+        ;;
+    esac
+    shift
+  done
+}
+
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 codex_rs_dir="$repo_root/codex-rs"
+
+parse_args "$@"
 
 if [ ! -d "$codex_rs_dir" ]; then
   fail "Could not find codex-rs workspace at: $codex_rs_dir"
@@ -52,10 +90,22 @@ if [ -z "$npm_root" ]; then
   fail "npm global root is empty."
 fi
 
+case "$build_profile" in
+  release)
+    build_output_dir="release"
+    ;;
+  dev)
+    build_output_dir="debug"
+    ;;
+  *)
+    build_output_dir="$build_profile"
+    ;;
+esac
+
 codex_package_root="$npm_root/@openai/codex"
 platform_package_root="$codex_package_root/node_modules/@openai/$platform_package"
 installed_bin="$platform_package_root/vendor/$target_triple/bin/codex"
-source_bin="$codex_rs_dir/target/release/codex"
+source_bin="$codex_rs_dir/target/$build_output_dir/codex"
 
 if [ ! -d "$codex_package_root" ]; then
   fail "Global @openai/codex package not found at: $codex_package_root. Install it with: npm install -g @openai/codex"
@@ -69,10 +119,20 @@ if [ ! -f "$installed_bin" ]; then
   fail "Installed Codex binary not found at: $installed_bin"
 fi
 
-step "Building codex-cli release binary"
+step "Building codex-cli with Cargo profile: $build_profile"
 (
   cd "$codex_rs_dir"
-  CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" cargo build --locked -p codex-cli --release
+  case "$build_profile" in
+    release)
+      cargo build --locked -p codex-cli --release
+      ;;
+    dev)
+      cargo build --locked -p codex-cli
+      ;;
+    *)
+      cargo build --locked -p codex-cli --profile "$build_profile"
+      ;;
+  esac
 )
 
 if [ ! -f "$source_bin" ]; then

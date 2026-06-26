@@ -1,8 +1,14 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$Profile = $env:CODEX_REINSTALL_PROFILE
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Profile)) {
+    $Profile = "dev-small"
+}
 
 function Write-Step {
     param(
@@ -95,10 +101,22 @@ if ([string]::IsNullOrWhiteSpace($npmRoot)) {
     throw "npm global root is empty."
 }
 
+$buildOutputDir = switch ($Profile) {
+    "release" { "release" }
+    "dev" { "debug" }
+    default { $Profile }
+}
+
+$cargoArgs = switch ($Profile) {
+    "release" { @("build", "--locked", "-p", "codex-cli", "--release") }
+    "dev" { @("build", "--locked", "-p", "codex-cli") }
+    default { @("build", "--locked", "-p", "codex-cli", "--profile", $Profile) }
+}
+
 $codexPackageRoot = Join-Path $npmRoot "@openai\codex"
 $platformPackageRoot = Join-Path $codexPackageRoot "node_modules\@openai\$platformPackage"
 $installedBin = Join-Path $platformPackageRoot "vendor\$targetTriple\bin\codex.exe"
-$sourceBin = Join-Path $codexRsDir "target\release\codex.exe"
+$sourceBin = Join-Path $codexRsDir "target\$buildOutputDir\codex.exe"
 
 if (-not (Test-Path -LiteralPath $codexPackageRoot -PathType Container)) {
     throw "Global @openai/codex package not found at: $codexPackageRoot. Install it with: npm install -g @openai/codex"
@@ -112,13 +130,10 @@ if (-not (Test-Path -LiteralPath $installedBin -PathType Leaf)) {
     throw "Installed Codex binary not found at: $installedBin"
 }
 
-Write-Step "Building codex-cli release binary"
+Write-Step "Building codex-cli with Cargo profile: $Profile"
 Push-Location -LiteralPath $codexRsDir
 try {
-    if ([string]::IsNullOrWhiteSpace($env:CARGO_BUILD_JOBS)) {
-        $env:CARGO_BUILD_JOBS = "1"
-    }
-    & $cargoPath build --locked -p codex-cli --release
+    & $cargoPath @cargoArgs
 } finally {
     Pop-Location
 }
