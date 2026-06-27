@@ -64,6 +64,55 @@ function Add-DirectoryToPath {
     $env:PATH = "$Directory;$env:PATH"
 }
 
+function Test-FileContainsCrLf {
+    param(
+        [string]$Path
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    for ($index = 0; $index -lt ($bytes.Length - 1); $index++) {
+        if ($bytes[$index] -eq 13 -and $bytes[$index + 1] -eq 10) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Assert-SqlxMigrationsUseLf {
+    param(
+        [string]$CodexRsDir
+    )
+
+    $migrationDirs = @(
+        "state\migrations",
+        "state\logs_migrations",
+        "state\goals_migrations",
+        "state\memory_migrations"
+    )
+    $badFiles = @()
+
+    foreach ($relativeDir in $migrationDirs) {
+        $dir = Join-Path $CodexRsDir $relativeDir
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+            continue
+        }
+
+        Get-ChildItem -LiteralPath $dir -Filter "*.sql" -File | ForEach-Object {
+            if (Test-FileContainsCrLf -Path $_.FullName) {
+                $badFiles += $_.FullName
+            }
+        }
+    }
+
+    if ($badFiles.Count -eq 0) {
+        return
+    }
+
+    $fileList = $badFiles -join [Environment]::NewLine
+    throw "SQLx migration files must use LF line endings before building Codex. CRLF changes migration checksums and can make local SQLite DBs fail to open after reinstall. Normalize these files and rerun the script:$([Environment]::NewLine)$fileList"
+}
+
 $scriptDir = Split-Path -Parent $PSCommandPath
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptDir "..\..")).Path
 $codexRsDir = Join-Path $repoRoot "codex-rs"
@@ -129,6 +178,8 @@ if (-not (Test-Path -LiteralPath $platformPackageRoot -PathType Container)) {
 if (-not (Test-Path -LiteralPath $installedBin -PathType Leaf)) {
     throw "Installed Codex binary not found at: $installedBin"
 }
+
+Assert-SqlxMigrationsUseLf -CodexRsDir $codexRsDir
 
 Write-Step "Building codex-cli with Cargo profile: $Profile"
 Push-Location -LiteralPath $codexRsDir

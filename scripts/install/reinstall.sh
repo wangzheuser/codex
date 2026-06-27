@@ -20,6 +20,33 @@ require_command() {
   fi
 }
 
+assert_sqlx_migrations_use_lf() {
+  bad_files=""
+  for relative_dir in \
+    state/migrations \
+    state/logs_migrations \
+    state/goals_migrations \
+    state/memory_migrations
+  do
+    dir="$codex_rs_dir/$relative_dir"
+    [ -d "$dir" ] || continue
+    for file in "$dir"/*.sql; do
+      [ -f "$file" ] || continue
+      if LC_ALL=C grep "$(printf '\r')" "$file" >/dev/null; then
+        bad_files="${bad_files}${file}
+"
+      fi
+    done
+  done
+
+  if [ -n "$bad_files" ]; then
+    printf 'ERROR: SQLx migration files must use LF line endings before building Codex.\n' >&2
+    printf 'CRLF changes migration checksums and can make local SQLite DBs fail to open after reinstall.\n' >&2
+    printf 'Normalize these files and rerun the script:\n%s' "$bad_files" >&2
+    exit 1
+  fi
+}
+
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -118,6 +145,8 @@ fi
 if [ ! -f "$installed_bin" ]; then
   fail "Installed Codex binary not found at: $installed_bin"
 fi
+
+assert_sqlx_migrations_use_lf
 
 step "Building codex-cli with Cargo profile: $build_profile"
 (
