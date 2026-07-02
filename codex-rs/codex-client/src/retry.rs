@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn backoff_returns_fixed_base_delay_for_every_attempt() {
-        let base = Duration::from_millis(20);
+        let base = Duration::from_millis(100);
 
         for attempt in [0, 1, 2, 10, 1000] {
             assert_eq!(backoff(base, attempt), base);

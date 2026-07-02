@@ -10,7 +10,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
 use tracing::warn;
 
-const RESPONSE_STREAM_RETRY_DELAY: Duration = Duration::from_millis(20);
+const RESPONSE_STREAM_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {

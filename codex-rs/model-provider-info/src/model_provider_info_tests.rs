@@ -159,7 +159,7 @@ fn default_retry_settings_use_fixed_fast_retry_budget() {
     assert_eq!(provider.request_max_retries(), 1000);
     assert_eq!(provider.stream_max_retries(), 1000);
     assert_eq!(api_provider.retry.max_attempts, 1000);
-    assert_eq!(api_provider.retry.base_delay, Duration::from_millis(20));
+    assert_eq!(api_provider.retry.base_delay, Duration::from_millis(100));
     assert!(!api_provider.retry.retry_429);
 }
 

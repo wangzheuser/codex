@@ -300,7 +300,7 @@ async fn run_compact_task_inner_impl(
             Err(e) => {
                 if retries < max_retries {
                     retries += 1;
-                    let delay = Duration::from_millis(20);
+                    let delay = Duration::from_millis(100);
                     sess.notify_stream_error(
                         turn_context.as_ref(),
                         format!("Reconnecting... {retries}/{max_retries}"),
