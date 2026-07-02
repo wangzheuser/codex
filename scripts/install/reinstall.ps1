@@ -346,6 +346,7 @@ function Write-PowerShellShim {
 
     $binaryLiteral = ConvertTo-PowerShellLiteral -Value $installedBin
     $devHomeLiteral = ConvertTo-PowerShellLiteral -Value $devHome
+    $devVersionLiteral = ConvertTo-PowerShellLiteral -Value $devVersion
     $versionOutputLiteral = ConvertTo-PowerShellLiteral -Value "codex-cli $devVersion"
     $extra = if ($ExtraArgs.Count -gt 0) {
         " " + (($ExtraArgs | ForEach-Object { ConvertTo-PowerShellLiteral -Value $_ }) -join " ")
@@ -360,6 +361,7 @@ if (`$args.Count -eq 1 -and (`$args[0] -eq '--version' -or `$args[0] -eq '-V')) 
 }
 `$env:CODEX_HOME = $devHomeLiteral
 `$env:CODEX_SQLITE_HOME = $devHomeLiteral
+`$env:CODEX_CLI_DISPLAY_VERSION = $devVersionLiteral
 & $binaryLiteral$extra @args
 exit `$LASTEXITCODE
 "@
@@ -385,6 +387,7 @@ if "%~1"=="-V" if "%~2"=="" (
 )
 set "CODEX_HOME=$devHome"
 set "CODEX_SQLITE_HOME=$devHome"
+set "CODEX_CLI_DISPLAY_VERSION=$devVersion"
 "$installedBin"$extra %*
 exit /b %ERRORLEVEL%
 "@

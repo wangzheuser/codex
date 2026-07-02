@@ -171,6 +171,7 @@ write_shim() {
   extra_arg="$2"
   binary_literal="$(quote_sh "$installed_bin")"
   dev_home_literal="$(quote_sh "$dev_home")"
+  dev_version_literal="$(quote_sh "$dev_version")"
   extra=""
   if [ -n "$extra_arg" ]; then
     extra=" $(quote_sh "$extra_arg")"
@@ -184,6 +185,7 @@ if [ "\$#" -eq 1 ] && { [ "\$1" = "--version" ] || [ "\$1" = "-V" ]; }; then
 fi
 export CODEX_HOME=$dev_home_literal
 export CODEX_SQLITE_HOME=$dev_home_literal
+export CODEX_CLI_DISPLAY_VERSION=$dev_version_literal
 exec $binary_literal$extra "\$@"
 EOF
   chmod 0755 "$path"
@@ -211,7 +213,7 @@ Defaults:
 
 Environment:
   CODEX_REINSTALL_PROFILE   Build profile to use.
-  CODEX_DEV_VERSION         Exact dev version shown by codex-dev --version.
+  CODEX_DEV_VERSION         Exact dev version shown by codex-dev --version and TUI.
   CODEX_DEV_BASE_VERSION    Base version used to derive <base>-dev.
   CODEX_DEV_HOME            Dev Codex home. Defaults to ~/.codex-dev.
   CODEX_DEV_INSTALL_ROOT    Dev install root. Defaults to ~/.local/share/codex-dev.
