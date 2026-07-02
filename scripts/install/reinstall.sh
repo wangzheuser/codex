@@ -40,8 +40,8 @@ assert_sqlx_migrations_use_lf() {
   done
 
   if [ -n "$bad_files" ]; then
-    printf 'ERROR: SQLx migration files must use LF line endings before building Codex.\n' >&2
-    printf 'CRLF changes migration checksums and can make local SQLite DBs fail to open after reinstall.\n' >&2
+    printf 'ERROR: SQLx migration files must use LF line endings in the source tree before building Codex.\n' >&2
+    printf 'Runtime startup normalizes Windows migration checksums for official Codex compatibility, but source files must stay LF to keep cross-platform builds stable.\n' >&2
     printf 'Normalize these files and rerun the script:\n%s' "$bad_files" >&2
     exit 1
   fi
@@ -215,7 +215,7 @@ Environment:
   CODEX_REINSTALL_PROFILE   Build profile to use.
   CODEX_DEV_VERSION         Exact dev version shown by codex-dev --version and TUI.
   CODEX_DEV_BASE_VERSION    Base version used to derive <base>-dev.
-  CODEX_DEV_HOME            Dev Codex home. Defaults to ~/.codex-dev.
+  CODEX_DEV_HOME            Dev Codex home. Defaults to ~/.codex to share official Codex data.
   CODEX_DEV_INSTALL_ROOT    Dev install root. Defaults to ~/.local/share/codex-dev.
   CODEX_DEV_SHIM_DIR        Shim directory. Defaults to ~/.local/bin.
   CODEX_DEV_SEED_HOME       Source home for initial config copy. Defaults to ~/.codex.
@@ -263,7 +263,7 @@ if [ -z "${HOME:-}" ]; then
   fail "HOME is not set."
 fi
 
-dev_home="${CODEX_DEV_HOME:-$HOME/.codex-dev}"
+dev_home="${CODEX_DEV_HOME:-$HOME/.codex}"
 install_root="${CODEX_DEV_INSTALL_ROOT:-$HOME/.local/share/codex-dev}"
 shim_dir="${CODEX_DEV_SHIM_DIR:-$HOME/.local/bin}"
 source_home="${CODEX_DEV_SEED_HOME:-$HOME/.codex}"
@@ -275,6 +275,7 @@ dev_version="$(resolve_codex_dev_version)"
 assert_sqlx_migrations_use_lf
 
 step "Resolved codex-dev version: codex-cli $dev_version"
+step "Using Codex home for codex-dev: $dev_home"
 step "Building codex-cli with Cargo profile: $build_profile"
 (
   cd "$codex_rs_dir"

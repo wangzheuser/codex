@@ -110,7 +110,7 @@ function Assert-SqlxMigrationsUseLf {
     }
 
     $fileList = $badFiles -join [Environment]::NewLine
-    throw "SQLx migration files must use LF line endings before building Codex. CRLF changes migration checksums and can make local SQLite DBs fail to open after reinstall. Normalize these files and rerun the script:$([Environment]::NewLine)$fileList"
+    throw "SQLx migration files must use LF line endings in the source tree before building Codex. Runtime startup normalizes Windows migration checksums for official Codex compatibility, but source files must stay LF to keep cross-platform builds stable. Normalize these files and rerun the script:$([Environment]::NewLine)$fileList"
 }
 
 function Get-PackageJsonVersion {
@@ -307,7 +307,7 @@ $userProfile = if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
 $devHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_DEV_HOME)) {
     $env:CODEX_DEV_HOME
 } else {
-    Join-Path $userProfile ".codex-dev"
+    Join-Path $userProfile ".codex"
 }
 $installRoot = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_DEV_INSTALL_ROOT)) {
     $env:CODEX_DEV_INSTALL_ROOT
@@ -397,6 +397,7 @@ exit /b %ERRORLEVEL%
 Assert-SqlxMigrationsUseLf -CodexRsDir $codexRsDir
 
 Write-Step "Resolved codex-dev version: codex-cli $devVersion"
+Write-Step "Using Codex home for codex-dev: $devHome"
 Write-Step "Building codex-cli with Cargo profile: $Profile"
 Push-Location -LiteralPath $codexRsDir
 try {
