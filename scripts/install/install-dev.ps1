@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Profile = $env:CODEX_REINSTALL_PROFILE
+    [string]$Profile = $env:CODEX_DEV_BUILD_PROFILE
 )
 
 Set-StrictMode -Version Latest

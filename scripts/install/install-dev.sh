@@ -2,7 +2,7 @@
 
 set -eu
 
-build_profile="${CODEX_REINSTALL_PROFILE:-dev-small}"
+build_profile="${CODEX_DEV_BUILD_PROFILE:-dev-small}"
 
 step() {
   printf '==> %s\n' "$1"
@@ -206,13 +206,13 @@ parse_args() {
         ;;
       --help|-h)
         cat <<EOF
-Usage: reinstall.sh [--profile PROFILE] [--release]
+Usage: install-dev.sh [--profile PROFILE] [--release]
 
 Defaults:
   PROFILE defaults to dev-small for faster local rebuilds.
 
 Environment:
-  CODEX_REINSTALL_PROFILE   Build profile to use.
+  CODEX_DEV_BUILD_PROFILE    Build profile to use.
   CODEX_DEV_VERSION         Exact dev version shown by codex-dev --version and TUI.
   CODEX_DEV_BASE_VERSION    Base version used to derive <base>-dev.
   CODEX_DEV_HOME            Dev Codex home. Defaults to ~/.codex to share official Codex data.
@@ -244,7 +244,7 @@ fi
 require_command cargo
 
 if [ "$(uname -s)" != "Darwin" ]; then
-  fail "reinstall.sh only supports macOS. Use reinstall.ps1 on Windows."
+  fail "install-dev.sh only supports macOS. Use install-dev.ps1 on Windows."
 fi
 
 case "$build_profile" in

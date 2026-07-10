@@ -1,0 +1,38 @@
+name: Auto merge main into dev
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-merge-main-to-dev
+  cancel-in-progress: false
+
+jobs:
+  merge-main-to-dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge main into dev
+        run: |
+          git fetch origin main dev
+          git checkout dev
+          git merge --no-ff origin/main -m "merge: 自动合并 main 分支最新代码到 dev"
+
+      - name: Push dev
+        run: git push origin dev
