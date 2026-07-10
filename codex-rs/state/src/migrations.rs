@@ -67,6 +67,7 @@ pub(crate) fn runtime_memories_migrator() -> Migrator {
     runtime_migrator(&MEMORIES_MIGRATOR)
 }
 
+#[cfg(windows)]
 fn with_crlf_line_endings(sql: &str) -> String {
     sql.replace("\r\n", "\n").replace('\n', "\r\n")
 }

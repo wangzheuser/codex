@@ -1,8 +1,10 @@
 use std::borrow::Cow;
 
 use pretty_assertions::assert_eq;
+#[cfg(windows)]
 use sqlx::AssertSqlSafe;
 use sqlx::Row;
+#[cfg(windows)]
 use sqlx::SqlSafeStr;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
@@ -10,7 +12,9 @@ use sqlx::sqlite::SqlitePoolOptions;
 
 use super::STATE_MIGRATOR;
 use super::repair_legacy_recency_migration_version;
+#[cfg(windows)]
 use super::repair_line_ending_migration_checksums;
+#[cfg(windows)]
 use super::runtime_state_migrator;
 
 fn migrator_through(version: i64) -> Migrator {
@@ -31,6 +35,7 @@ fn migrator_through(version: i64) -> Migrator {
     }
 }
 
+#[cfg(windows)]
 fn with_crlf_line_endings(sql: &str) -> String {
     sql.replace("\r\n", "\n").replace('\n', "\r\n")
 }
