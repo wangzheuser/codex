@@ -3,7 +3,6 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use pretty_assertions::assert_eq;
 use std::num::NonZeroU64;
-use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
@@ -144,6 +143,15 @@ fn test_supports_remote_compaction_for_openai() {
 fn test_personal_access_token_uses_chatgpt_codex_base_url() {
     let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
         .to_api_provider(Some(AuthMode::PersonalAccessToken))
+        .expect("OpenAI provider should build API provider");
+
+    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+}
+
+#[test]
+fn test_header_auth_uses_chatgpt_codex_base_url() {
+    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        .to_api_provider(Some(AuthMode::Headers))
         .expect("OpenAI provider should build API provider");
 
     assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
