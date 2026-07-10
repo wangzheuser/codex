@@ -285,17 +285,11 @@ $cargoPath = Assert-Command -Name "cargo" -FallbackPaths @(
     $(if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe" })
 )
 Add-DirectoryToPath -Directory (Split-Path -Parent $cargoPath)
-
-$buildOutputDir = switch ($Profile) {
-    "release" { "release" }
-    "dev" { "debug" }
-    default { $Profile }
-}
-
-$cargoArgs = switch ($Profile) {
-    "release" { @("build", "--locked", "-p", "codex-cli", "--release") }
-    "dev" { @("build", "--locked", "-p", "codex-cli") }
-    default { @("build", "--locked", "-p", "codex-cli", "--profile", $Profile) }
+$pythonPath = Assert-Command -Name "python"
+$rgPath = Assert-Command -Name "rg"
+$packageBuilder = Join-Path $repoRoot "scripts\build_codex_package.py"
+if (-not (Test-Path -LiteralPath $packageBuilder -PathType Leaf)) {
+    throw "Could not find Codex package builder at: $packageBuilder"
 }
 
 $userProfile = if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
@@ -327,7 +321,6 @@ $sourceHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_DEV_SEED_HOME)) {
 
 $installBinDir = Join-Path $installRoot "bin"
 $installedBin = Join-Path $installBinDir "codex.exe"
-$sourceBin = Join-Path $codexRsDir "target\$buildOutputDir\codex.exe"
 $devVersion = Resolve-CodexDevVersion -RepoRoot $repoRoot -UserProfile $userProfile
 
 function ConvertTo-PowerShellLiteral {
@@ -398,56 +391,83 @@ Assert-SqlxMigrationsUseLf -CodexRsDir $codexRsDir
 
 Write-Step "Resolved codex-dev version: codex-cli $devVersion"
 Write-Step "Using Codex home for codex-dev: $devHome"
-Write-Step "Building codex-cli with Cargo profile: $Profile"
-Push-Location -LiteralPath $codexRsDir
+$stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) "codex-dev-package-$([guid]::NewGuid().ToString('N'))"
 try {
-    & $cargoPath @cargoArgs
+    Write-Step "Building canonical Codex package with Cargo profile: $Profile"
+    & $pythonPath $packageBuilder `
+        --package-dir $stageRoot `
+        --cargo $cargoPath `
+        --cargo-profile $Profile `
+        --rg-bin $rgPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Codex package builder failed with exit code $LASTEXITCODE"
+    }
+
+    $expectedPackageFiles = @(
+        "codex-package.json",
+        "bin\codex.exe",
+        "bin\codex-code-mode-host.exe",
+        "codex-path\rg.exe",
+        "codex-resources\codex-command-runner.exe",
+        "codex-resources\codex-windows-sandbox-setup.exe"
+    )
+    foreach ($relativePath in $expectedPackageFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $stageRoot $relativePath) -PathType Leaf)) {
+            throw "Package builder did not produce expected file: $relativePath"
+        }
+    }
+
+    New-Item -ItemType Directory -Path $devHome -Force | Out-Null
+    New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
+
+    $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+    $backupBin = if (Test-Path -LiteralPath $installedBin -PathType Leaf) {
+        "$installedBin.backup.$timestamp"
+    } else {
+        $null
+    }
+
+    if ($null -ne $backupBin -and (Test-Path -LiteralPath $backupBin)) {
+        throw "Backup path already exists: $backupBin"
+    }
+
+    if ($null -ne $backupBin) {
+        Write-Step "Backing up existing codex-dev binary to $backupBin"
+        Copy-Item -LiteralPath $installedBin -Destination $backupBin
+    }
+
+    Write-Step "Installing canonical codex-dev package at $installRoot"
+    Copy-Item -Path (Join-Path $stageRoot "*") -Destination $installRoot -Recurse -Force
+
+    foreach ($relativePath in $expectedPackageFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $installRoot $relativePath) -PathType Leaf)) {
+            throw "Installed codex-dev package is missing expected file: $relativePath"
+        }
+    }
+
+    foreach ($fileName in @("config.toml", "auth.json", "AGENTS.md")) {
+        $sourcePath = Join-Path $sourceHome $fileName
+        $destinationPath = Join-Path $devHome $fileName
+        if ((Test-Path -LiteralPath $sourcePath -PathType Leaf) -and -not (Test-Path -LiteralPath $destinationPath)) {
+            Copy-Item -LiteralPath $sourcePath -Destination $destinationPath
+        }
+    }
+
+    Write-Step "Writing codex-dev and cx-dev shims to $shimDir"
+    Write-PowerShellShim -Path (Join-Path $shimDir "codex-dev.ps1")
+    Write-PowerShellShim -Path (Join-Path $shimDir "cx-dev.ps1") -ExtraArgs @("--dangerously-bypass-approvals-and-sandbox")
+    Write-CmdShim -Path (Join-Path $shimDir "codex-dev.cmd")
+    Write-CmdShim -Path (Join-Path $shimDir "cx-dev.cmd") -ExtraArgs @("--dangerously-bypass-approvals-and-sandbox")
+
+    Write-Step "Verifying installed codex-dev version"
+    & (Join-Path $shimDir "codex-dev.ps1") --version
+    Write-Step "Verifying installed cx-dev version"
+    & (Join-Path $shimDir "cx-dev.ps1") --version
 } finally {
-    Pop-Location
-}
-
-if (-not (Test-Path -LiteralPath $sourceBin -PathType Leaf)) {
-    throw "Build did not produce expected binary: $sourceBin"
-}
-
-New-Item -ItemType Directory -Path $devHome -Force | Out-Null
-New-Item -ItemType Directory -Path $installBinDir -Force | Out-Null
-New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
-
-$timestamp = Get-Date -Format "yyyyMMddHHmmss"
-$backupBin = if (Test-Path -LiteralPath $installedBin -PathType Leaf) {
-    "$installedBin.backup.$timestamp"
-} else {
-    $null
-}
-
-if ($null -ne $backupBin -and (Test-Path -LiteralPath $backupBin)) {
-    throw "Backup path already exists: $backupBin"
-}
-
-if ($null -ne $backupBin) {
-    Write-Step "Backing up existing codex-dev binary to $backupBin"
-    Copy-Item -LiteralPath $installedBin -Destination $backupBin
-}
-
-Write-Step "Installing codex-dev binary at $installedBin"
-Copy-Item -LiteralPath $sourceBin -Destination $installedBin -Force
-
-foreach ($fileName in @("config.toml", "auth.json", "AGENTS.md")) {
-    $sourcePath = Join-Path $sourceHome $fileName
-    $destinationPath = Join-Path $devHome $fileName
-    if ((Test-Path -LiteralPath $sourcePath -PathType Leaf) -and -not (Test-Path -LiteralPath $destinationPath)) {
-        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath
+    $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    $resolvedStageRoot = [System.IO.Path]::GetFullPath($stageRoot)
+    if ($resolvedStageRoot.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedStageRoot)) {
+        Remove-Item -LiteralPath $resolvedStageRoot -Recurse -Force
     }
 }
-
-Write-Step "Writing codex-dev and cx-dev shims to $shimDir"
-Write-PowerShellShim -Path (Join-Path $shimDir "codex-dev.ps1")
-Write-PowerShellShim -Path (Join-Path $shimDir "cx-dev.ps1") -ExtraArgs @("--dangerously-bypass-approvals-and-sandbox")
-Write-CmdShim -Path (Join-Path $shimDir "codex-dev.cmd")
-Write-CmdShim -Path (Join-Path $shimDir "cx-dev.cmd") -ExtraArgs @("--dangerously-bypass-approvals-and-sandbox")
-
-Write-Step "Verifying installed codex-dev version"
-& (Join-Path $shimDir "codex-dev.ps1") --version
-Write-Step "Verifying installed cx-dev version"
-& (Join-Path $shimDir "cx-dev.ps1") --version
