@@ -1,15 +1,14 @@
 use std::borrow::Cow;
 
-use sqlx::AssertSqlSafe;
-use sqlx::SqlSafeStr;
 use sqlx::SqlitePool;
-use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 
 pub(crate) static STATE_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub(crate) static LOGS_MIGRATOR: Migrator = sqlx::migrate!("./logs_migrations");
 pub(crate) static GOALS_MIGRATOR: Migrator = sqlx::migrate!("./goals_migrations");
 pub(crate) static MEMORIES_MIGRATOR: Migrator = sqlx::migrate!("./memory_migrations");
+pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx::migrate!("./queue_migrations");
+pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator = sqlx::migrate!("./thread_history_migrations");
 
 /// Allow an older Codex binary to open a database that has already been
 /// migrated by a newer binary running in parallel.
@@ -19,36 +18,13 @@ pub(crate) static MEMORIES_MIGRATOR: Migrator = sqlx::migrate!("./memory_migrati
 /// checksum, so this only relaxes the "database is ahead of me" case.
 fn runtime_migrator(base: &'static Migrator) -> Migrator {
     Migrator {
-        migrations: runtime_migrations(base),
+        migrations: Cow::Borrowed(base.migrations.as_ref()),
         ignore_missing: true,
         locking: base.locking,
         no_tx: base.no_tx,
         table_name: base.table_name.clone(),
         create_schemas: base.create_schemas.clone(),
     }
-}
-
-#[cfg(windows)]
-fn runtime_migrations(base: &'static Migrator) -> Cow<'static, [Migration]> {
-    Cow::Owned(
-        base.migrations
-            .iter()
-            .map(|migration| {
-                Migration::new(
-                    migration.version,
-                    migration.description.clone(),
-                    migration.migration_type,
-                    AssertSqlSafe(with_crlf_line_endings(migration.sql.as_str())).into_sql_str(),
-                    migration.no_tx,
-                )
-            })
-            .collect(),
-    )
-}
-
-#[cfg(not(windows))]
-fn runtime_migrations(base: &'static Migrator) -> Cow<'static, [Migration]> {
-    Cow::Borrowed(base.migrations.as_ref())
 }
 
 pub(crate) fn runtime_state_migrator() -> Migrator {
@@ -67,57 +43,14 @@ pub(crate) fn runtime_memories_migrator() -> Migrator {
     runtime_migrator(&MEMORIES_MIGRATOR)
 }
 
-#[cfg(windows)]
-fn with_crlf_line_endings(sql: &str) -> String {
-    sql.replace("\r\n", "\n").replace('\n', "\r\n")
+pub(crate) fn runtime_queue_migrator() -> Migrator {
+    runtime_migrator(&QUEUE_MIGRATOR)
 }
 
-fn with_lf_line_endings(sql: &str) -> String {
-    sql.replace("\r\n", "\n")
-}
-
-pub(crate) async fn repair_line_ending_migration_checksums(
-    pool: &SqlitePool,
-    migrator: &Migrator,
-) -> anyhow::Result<()> {
-    let migrations_table_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
-    )
-    .fetch_optional(pool)
-    .await?
-    .is_some();
-    if !migrations_table_exists {
-        return Ok(());
-    }
-
-    for migration in migrator.migrations.iter() {
-        let lf_migration = Migration::new(
-            migration.version,
-            migration.description.clone(),
-            migration.migration_type,
-            AssertSqlSafe(with_lf_line_endings(migration.sql.as_str())).into_sql_str(),
-            migration.no_tx,
-        );
-        if lf_migration.checksum == migration.checksum {
-            continue;
-        }
-
-        sqlx::query(
-            r#"
-UPDATE _sqlx_migrations
-SET checksum = ?
-WHERE version = ?
-  AND checksum = ?
-            "#,
-        )
-        .bind(migration.checksum.as_ref())
-        .bind(migration.version)
-        .bind(lf_migration.checksum.as_ref())
-        .execute(pool)
-        .await?;
-    }
-
-    Ok(())
+// The paginated history projector will call this when it takes ownership of opening the database.
+#[allow(dead_code)]
+pub(crate) fn runtime_thread_history_migrator() -> Migrator {
+    runtime_migrator(&THREAD_HISTORY_MIGRATOR)
 }
 
 pub(crate) async fn repair_legacy_recency_migration_version(
@@ -131,13 +64,6 @@ pub(crate) async fn repair_legacy_recency_migration_version(
     else {
         return Ok(());
     };
-    let lf_recency_migration = Migration::new(
-        recency_migration.version,
-        recency_migration.description.clone(),
-        recency_migration.migration_type,
-        AssertSqlSafe(with_lf_line_endings(recency_migration.sql.as_str())).into_sql_str(),
-        recency_migration.no_tx,
-    );
     let migrations_table_exists = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
@@ -148,12 +74,33 @@ pub(crate) async fn repair_legacy_recency_migration_version(
         return Ok(());
     }
 
+    let legacy_recency_needs_repair = sqlx::query_scalar::<_, i64>(
+        r#"
+SELECT 1
+FROM _sqlx_migrations
+WHERE version = ?
+  AND checksum = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM _sqlx_migrations WHERE version = ?
+  )
+        "#,
+    )
+    .bind(38_i64)
+    .bind(recency_migration.checksum.as_ref())
+    .bind(recency_migration.version)
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if !legacy_recency_needs_repair {
+        return Ok(());
+    }
+
     sqlx::query(
         r#"
 UPDATE _sqlx_migrations
-SET version = ?, description = ?, checksum = ?
+SET version = ?, description = ?
 WHERE version = ?
-  AND (checksum = ? OR checksum = ?)
+  AND checksum = ?
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
@@ -161,10 +108,8 @@ WHERE version = ?
     )
     .bind(recency_migration.version)
     .bind(recency_migration.description.as_ref())
-    .bind(recency_migration.checksum.as_ref())
     .bind(38_i64)
     .bind(recency_migration.checksum.as_ref())
-    .bind(lf_recency_migration.checksum.as_ref())
     .bind(recency_migration.version)
     .execute(pool)
     .await?;

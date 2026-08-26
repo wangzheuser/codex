@@ -2,7 +2,6 @@ use codex_http_client::Request;
 use codex_http_client::TransportError;
 use std::future::Future;
 use std::time::Duration;
-use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -28,7 +27,9 @@ impl RetryOn {
                 (self.retry_429 && status.as_u16() == 429)
                     || (self.retry_5xx && status.is_server_error())
             }
-            TransportError::Timeout | TransportError::Network(_) => self.retry_transport,
+            TransportError::Timeout
+            | TransportError::Connection(_)
+            | TransportError::Network(_) => self.retry_transport,
             _ => false,
         }
     }
@@ -37,6 +38,36 @@ impl RetryOn {
 /// Returns the fixed retry delay used between attempts.
 pub fn backoff(base: Duration, _attempt: u64) -> Duration {
     base
+}
+
+/// Identifies a retry path and its associated trace-event layer.
+#[derive(Debug, Clone, Copy)]
+pub enum RetryOperation {
+    HttpRequest,
+    Sampling,
+    RemoteCompactionV2,
+}
+
+/// Emits retry telemetry at the caller's source location without adding it to normal OTEL logs.
+#[macro_export]
+macro_rules! record_retry {
+    ($attempt:expr, $delay:expr, $operation:expr $(,)?) => {{
+        let (layer, operation) = match $operation {
+            $crate::RetryOperation::HttpRequest => ("http", "request"),
+            $crate::RetryOperation::Sampling => ("stream", "sampling"),
+            $crate::RetryOperation::RemoteCompactionV2 => ("stream", "remote_compaction_v2"),
+        };
+
+        ::tracing::event!(
+            target: "codex_otel.trace_safe",
+            ::tracing::Level::TRACE,
+            event.name = "codex.retry",
+            retry.attempt = $attempt,
+            retry.delay_ms = ($delay).as_millis() as u64,
+            retry.layer = layer,
+            retry.operation = operation,
+        );
+    }};
 }
 
 pub async fn run_with_retry<T, F, Fut>(
@@ -57,7 +88,10 @@ where
                     .retry_on
                     .should_retry(&err, attempt, policy.max_attempts) =>
             {
-                sleep(backoff(policy.base_delay, attempt + 1)).await;
+                let retry_attempt = attempt + 1;
+                let delay = backoff(policy.base_delay, retry_attempt);
+                crate::record_retry!(retry_attempt, delay, RetryOperation::HttpRequest);
+                tokio::time::sleep(delay).await;
             }
             Err(err) => return Err(err),
         }

@@ -1,21 +1,23 @@
 #![allow(warnings, clippy::all)]
 
 use super::*;
+use crate::CompactedItem;
+use crate::RolloutItem;
+use crate::RolloutLine;
 use chrono::DateTime;
 use chrono::NaiveDateTime;
 use chrono::Timelike;
 use chrono::Utc;
+use codex_protocol::SanitizedGitUrl;
 use codex_protocol::ThreadId;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::GitInfo;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_state::BackfillStatus;
 use codex_state::ThreadMetadataBuilder;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use std::fs::File;
 use std::io::Write;
@@ -53,6 +55,8 @@ async fn extract_metadata_from_rollout_uses_session_meta() {
         selected_capability_roots: Vec::new(),
         memory_mode: None,
         history_mode: ThreadHistoryMode::Paginated,
+        history_base: None,
+        subagent_history_start_ordinal: None,
         multi_agent_version: None,
         context_window: None,
     };
@@ -62,6 +66,7 @@ async fn extract_metadata_from_rollout_uses_session_meta() {
     };
     let rollout_line = RolloutLine {
         timestamp: "2026-01-27T12:34:56Z".to_string(),
+        ordinal: Some(0),
         item: RolloutItem::SessionMeta(session_meta_line.clone()),
     };
     let json = serde_json::to_string(&rollout_line).expect("rollout json");
@@ -93,6 +98,7 @@ async fn extract_metadata_from_rollout_rejects_unknown_history_mode() {
         .join(format!("rollout-2026-01-27T12-34-56-{uuid}.jsonl"));
     let mut rollout_line = serde_json::to_value(RolloutLine {
         timestamp: "2026-01-27T12:34:56Z".to_string(),
+        ordinal: None,
         item: RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
                 session_id: id.into(),
@@ -147,6 +153,8 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
         selected_capability_roots: Vec::new(),
         memory_mode: None,
         history_mode: Default::default(),
+        history_base: None,
+        subagent_history_start_ordinal: None,
         multi_agent_version: None,
         context_window: None,
     };
@@ -158,6 +166,7 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
     let lines = vec![
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: session_meta,
                 git: None,
@@ -165,6 +174,7 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
         },
         RolloutLine {
             timestamp: "2026-01-27T12:35:00Z".to_string(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: polluted_meta,
                 git: None,
@@ -198,6 +208,7 @@ fn builder_from_items_falls_back_to_filename() {
     let items = vec![RolloutItem::Compacted(CompactedItem {
         message: "noop".to_string(),
         replacement_history: None,
+        mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
         previous_window_id: None,
@@ -241,9 +252,12 @@ async fn backfill_sessions_resumes_from_watermark_and_marks_complete() {
         /*git*/ None,
     );
 
-    let runtime = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+        "test-provider".to_string(),
+    )
+    .await
+    .expect("initialize runtime");
     let first_watermark = backfill_watermark_for_path(codex_home.as_path(), first_path.as_path());
     runtime.mark_backfill_running().await.expect("mark running");
     runtime
@@ -302,13 +316,19 @@ async fn backfill_sessions_preserves_existing_git_branch_and_fills_missing_git_f
         Some(GitInfo {
             commit_hash: Some(codex_git_utils::GitSha::new("rollout-sha")),
             branch: Some("rollout-branch".to_string()),
-            repository_url: Some("git@example.com:openai/codex.git".to_string()),
+            repository_url: Some(
+                SanitizedGitUrl::try_from("git@example.com:openai/codex.git")
+                    .expect("valid git remote URL"),
+            ),
         }),
     );
 
-    let runtime = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+        "test-provider".to_string(),
+    )
+    .await
+    .expect("initialize runtime");
     let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
     let mut existing = extract_metadata_from_rollout(&rollout_path, "test-provider")
         .await
@@ -338,6 +358,55 @@ async fn backfill_sessions_preserves_existing_git_branch_and_fills_missing_git_f
 }
 
 #[tokio::test]
+async fn backfill_sessions_preserves_existing_paginated_memory_mode() {
+    let dir = tempdir().expect("tempdir");
+    let codex_home = dir.path().to_path_buf();
+    let thread_uuid = Uuid::new_v4();
+    let rollout_path = write_rollout_in_sessions_with_cwd(
+        codex_home.as_path(),
+        "2026-01-27T12-34-56",
+        "2026-01-27T12:34:56Z",
+        thread_uuid,
+        codex_home.clone(),
+        /*git*/ None,
+        ThreadHistoryMode::Paginated,
+    );
+
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+        "test-provider".to_string(),
+    )
+    .await
+    .expect("initialize runtime");
+    let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
+    let existing = extract_metadata_from_rollout(&rollout_path, "test-provider")
+        .await
+        .expect("extract")
+        .metadata;
+    runtime
+        .upsert_thread(&existing)
+        .await
+        .expect("existing metadata upsert");
+    assert!(
+        runtime
+            .set_thread_memory_mode(thread_id, "disabled")
+            .await
+            .expect("disable memory mode")
+    );
+
+    backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
+
+    assert_eq!(
+        runtime
+            .get_thread_memory_mode(thread_id)
+            .await
+            .expect("get memory mode")
+            .as_deref(),
+        Some("disabled")
+    );
+}
+
+#[tokio::test]
 async fn backfill_sessions_normalizes_cwd_before_upsert() {
     let dir = tempdir().expect("tempdir");
     let codex_home = dir.path().to_path_buf();
@@ -350,11 +419,15 @@ async fn backfill_sessions_normalizes_cwd_before_upsert() {
         thread_uuid,
         session_cwd.clone(),
         /*git*/ None,
+        ThreadHistoryMode::Legacy,
     );
 
-    let runtime = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+        "test-provider".to_string(),
+    )
+    .await
+    .expect("initialize runtime");
 
     backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
 
@@ -383,6 +456,7 @@ fn write_rollout_in_sessions(
         thread_uuid,
         codex_home.to_path_buf(),
         git,
+        ThreadHistoryMode::Legacy,
     )
 }
 
@@ -393,6 +467,7 @@ fn write_rollout_in_sessions_with_cwd(
     thread_uuid: Uuid,
     cwd: PathBuf,
     git: Option<GitInfo>,
+    history_mode: ThreadHistoryMode,
 ) -> PathBuf {
     let id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
     let sessions_dir = codex_home.join("sessions");
@@ -417,7 +492,9 @@ fn write_rollout_in_sessions_with_cwd(
         dynamic_tools: None,
         selected_capability_roots: Vec::new(),
         memory_mode: None,
-        history_mode: Default::default(),
+        history_mode,
+        history_base: None,
+        subagent_history_start_ordinal: None,
         multi_agent_version: None,
         context_window: None,
     };
@@ -427,6 +504,7 @@ fn write_rollout_in_sessions_with_cwd(
     };
     let rollout_line = RolloutLine {
         timestamp: event_ts.to_string(),
+        ordinal: None,
         item: RolloutItem::SessionMeta(session_meta_line),
     };
     let json = serde_json::to_string(&rollout_line).expect("serialize rollout");

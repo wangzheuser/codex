@@ -9,16 +9,20 @@ use crate::facts::AnalyticsJsonRpcError;
 use crate::facts::AppInvocation;
 use crate::facts::AppMentionedInput;
 use crate::facts::AppUsedInput;
+use crate::facts::ArtifactOperation;
+use crate::facts::ArtifactOperationInput;
 use crate::facts::CodexGoalEvent;
 use crate::facts::CustomAnalyticsFact;
 use crate::facts::ExternalAgentConfigImportCompletedInput;
 use crate::facts::ExternalAgentConfigImportFailureInput;
 use crate::facts::HookRunFact;
 use crate::facts::HookRunInput;
+use crate::facts::ImagePreparationFact;
 use crate::facts::PluginInstallFailedInput;
 use crate::facts::PluginInstallRequested;
 use crate::facts::PluginInstallRequestedInput;
 use crate::facts::PluginInstallSource;
+use crate::facts::PluginMeasurementsInput;
 use crate::facts::PluginState;
 use crate::facts::PluginStateChangedInput;
 use crate::facts::SkillInvocation;
@@ -29,10 +33,16 @@ use crate::facts::TurnCodexErrorFact;
 use crate::facts::TurnProfileFact;
 use crate::facts::TurnResolvedConfigFact;
 use crate::facts::TurnTokenUsageFact;
+use crate::now_unix_millis;
 use crate::reducer::AnalyticsReducer;
+use crate::reducer::MAX_PLUGIN_MEASUREMENTS_PER_BATCH;
+use crate::reducer::valid_plugin_measurement_identifier;
+use crate::reducer::valid_plugin_measurement_row;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::InitializeParams;
+use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -43,6 +53,9 @@ use codex_login::CodexAuth;
 use codex_login::default_client::create_client;
 use codex_plugin::PluginId;
 use codex_plugin::PluginTelemetryMetadata;
+use codex_protocol::items::CollabAgentToolCallItem;
+use codex_protocol::items::CollabAgentToolCallStatus;
+use codex_protocol::items::TurnItem;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -50,14 +63,22 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 const ANALYTICS_EVENTS_QUEUE_SIZE: usize = 256;
 const ANALYTICS_EVENTS_TIMEOUT: Duration = Duration::from_secs(10);
+// Covers two sequential POSTs plus queue/barrier scheduling; additional queued sends remain best-effort.
+const ANALYTICS_EVENTS_FLUSH_TIMEOUT: Duration = Duration::from_secs(25);
 const ANALYTICS_EVENT_DEDUPE_MAX_KEYS: usize = 4096;
+
+pub(crate) enum AnalyticsEventsQueueMessage {
+    Fact(Box<AnalyticsFact>),
+    Flush(oneshot::Sender<()>),
+}
 
 #[derive(Clone)]
 pub(crate) struct AnalyticsEventsQueue {
-    pub(crate) sender: mpsc::Sender<AnalyticsFact>,
+    pub(crate) sender: mpsc::Sender<AnalyticsEventsQueueMessage>,
     pub(crate) app_used_emitted_keys: Arc<Mutex<HashSet<(String, String)>>>,
     pub(crate) plugin_used_emitted_keys: Arc<Mutex<HashSet<(String, String)>>>,
 }
@@ -128,6 +149,16 @@ impl AnalyticsEventsQueue {
         tokio::spawn(async move {
             let mut reducer = AnalyticsReducer::default();
             while let Some(input) = receiver.recv().await {
+                let input = match input {
+                    AnalyticsEventsQueueMessage::Fact(input) => *input,
+                    AnalyticsEventsQueueMessage::Flush(done_tx) => {
+                        let mut events = Vec::new();
+                        reducer.flush(&mut events);
+                        send_track_events(&auth_manager, &destination, events).await;
+                        let _ = done_tx.send(());
+                        continue;
+                    }
+                };
                 let mut events = Vec::new();
                 reducer.ingest(input, &mut events).await;
                 send_track_events(&auth_manager, &destination, events).await;
@@ -141,7 +172,11 @@ impl AnalyticsEventsQueue {
     }
 
     fn try_send(&self, input: AnalyticsFact) {
-        if self.sender.try_send(input).is_err() {
+        if self
+            .sender
+            .try_send(AnalyticsEventsQueueMessage::Fact(Box::new(input)))
+            .is_err()
+        {
             //TODO: add a metric for this
             tracing::warn!("dropping analytics events: queue is full");
         }
@@ -206,6 +241,49 @@ impl AnalyticsEventsClient {
         Self { queue: None }
     }
 
+    pub async fn flush(&self) {
+        let Some(queue) = self.queue.as_ref() else {
+            return;
+        };
+        let (done_tx, done_rx) = oneshot::channel();
+        let flushed = tokio::time::timeout(ANALYTICS_EVENTS_FLUSH_TIMEOUT, async {
+            if queue
+                .sender
+                .send(AnalyticsEventsQueueMessage::Flush(done_tx))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            done_rx.await.is_ok()
+        })
+        .await;
+
+        if !matches!(flushed, Ok(true)) {
+            tracing::warn!("timed out or failed while flushing analytics events");
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.queue.is_some()
+    }
+
+    pub fn track_plugin_measurements(&self, mut input: PluginMeasurementsInput) {
+        if input.rows.is_empty()
+            || input.rows.len() > MAX_PLUGIN_MEASUREMENTS_PER_BATCH
+            || !valid_plugin_measurement_identifier(&input.operation)
+        {
+            return;
+        }
+        input.rows.retain(valid_plugin_measurement_row);
+        if input.rows.is_empty() {
+            return;
+        }
+        self.record_fact(AnalyticsFact::Custom(
+            CustomAnalyticsFact::PluginMeasurements(input),
+        ));
+    }
+
     pub fn track_skill_invocations(
         &self,
         tracking: TrackEventsContext,
@@ -220,6 +298,19 @@ impl AnalyticsEventsClient {
                 invocations,
             },
         )));
+    }
+
+    pub fn track_artifact_operation(
+        &self,
+        tracking: TrackEventsContext,
+        operation: ArtifactOperation,
+    ) {
+        self.record_fact(AnalyticsFact::Custom(
+            CustomAnalyticsFact::ArtifactOperation(ArtifactOperationInput {
+                tracking,
+                operation,
+            }),
+        ));
     }
 
     pub fn track_initialize(
@@ -242,6 +333,45 @@ impl AnalyticsEventsClient {
         self.record_fact(AnalyticsFact::Custom(
             CustomAnalyticsFact::SubAgentThreadStarted(input),
         ));
+    }
+
+    pub fn track_collab_tool_call(
+        &self,
+        turn_id: String,
+        mut item: CollabAgentToolCallItem,
+        started_at_ms: i64,
+        completed_at_ms: i64,
+    ) {
+        let thread_id = item.sender_thread_id.to_string();
+        let completed_item = TurnItem::CollabAgentToolCall(item.clone()).into();
+        item.status = CollabAgentToolCallStatus::InProgress;
+
+        self.track_notification(&ServerNotification::ItemStarted(ItemStartedNotification {
+            item: TurnItem::CollabAgentToolCall(item).into(),
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            started_at_ms,
+        }));
+        self.track_notification(&ServerNotification::ItemCompleted(
+            ItemCompletedNotification {
+                item: completed_item,
+                thread_id,
+                turn_id,
+                completed_at_ms,
+            },
+        ));
+    }
+
+    pub fn track_code_mode_tool_call(&self, input: crate::facts::CodeModeToolCallFact) {
+        self.record_fact(AnalyticsFact::Custom(
+            CustomAnalyticsFact::CodeModeToolCall(input),
+        ));
+    }
+
+    pub fn track_control_tool_call(&self, input: crate::facts::ControlToolCallFact) {
+        self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::ControlToolCall(
+            input,
+        )));
     }
 
     pub fn track_guardian_review(
@@ -270,6 +400,18 @@ impl AnalyticsEventsClient {
         request_id: RequestId,
         request: &ClientRequest,
     ) {
+        if let ClientRequest::TurnInterrupt { params, .. } = request {
+            if params.turn_id.is_empty() {
+                return;
+            }
+            self.record_fact(AnalyticsFact::ExplicitClientInterruptRequest {
+                connection_id,
+                request_id,
+                turn_id: params.turn_id.clone(),
+                requested_at_ms: now_unix_millis(),
+            });
+            return;
+        }
         if !matches!(
             request,
             ClientRequest::TurnStart { .. } | ClientRequest::TurnSteer { .. }
@@ -338,6 +480,12 @@ impl AnalyticsEventsClient {
         ))));
     }
 
+    pub fn track_image_preparation(&self, fact: ImagePreparationFact) {
+        self.record_fact(AnalyticsFact::Custom(
+            CustomAnalyticsFact::ImagePreparation(Box::new(fact)),
+        ));
+    }
+
     pub fn track_turn_resolved_config(&self, fact: TurnResolvedConfigFact) {
         self.record_fact(AnalyticsFact::Custom(
             CustomAnalyticsFact::TurnResolvedConfig(Box::new(fact)),
@@ -376,12 +524,14 @@ impl AnalyticsEventsClient {
         plugin: PluginTelemetryMetadata,
         source: PluginInstallSource,
         error_type: String,
+        sub_error_type: Option<String>,
     ) {
         self.record_fact(AnalyticsFact::Custom(
             CustomAnalyticsFact::PluginInstallFailed(PluginInstallFailedInput {
                 plugin,
                 source,
                 error_type,
+                sub_error_type,
             }),
         ));
     }
@@ -441,7 +591,7 @@ impl AnalyticsEventsClient {
         &self,
         connection_id: u64,
         request_id: RequestId,
-        response: ClientResponsePayload,
+        response: &ClientResponsePayload,
     ) {
         self.track_response_inner(
             connection_id,
@@ -455,7 +605,7 @@ impl AnalyticsEventsClient {
         &self,
         connection_id: u64,
         request_id: RequestId,
-        response: ClientResponsePayload,
+        response: &ClientResponsePayload,
         thread_originator: String,
     ) {
         self.track_response_inner(connection_id, request_id, response, Some(thread_originator));
@@ -465,7 +615,7 @@ impl AnalyticsEventsClient {
         &self,
         connection_id: u64,
         request_id: RequestId,
-        response: ClientResponsePayload,
+        response: &ClientResponsePayload,
         thread_originator: Option<String>,
     ) {
         if !matches!(
@@ -475,13 +625,17 @@ impl AnalyticsEventsClient {
                 | ClientResponsePayload::ThreadFork(_)
                 | ClientResponsePayload::TurnStart(_)
                 | ClientResponsePayload::TurnSteer(_)
+                | ClientResponsePayload::TurnInterrupt(_)
         ) {
+            return;
+        }
+        if serde_json::to_writer(std::io::sink(), response).is_err() {
             return;
         }
         self.record_fact(AnalyticsFact::ClientResponse {
             connection_id,
             request_id,
-            response: Box::new(response),
+            response: Box::new(response.clone()),
             thread_originator,
         });
     }
@@ -535,10 +689,14 @@ impl AnalyticsEventsClient {
         });
     }
 
-    pub fn track_notification(&self, notification: ServerNotification) {
+    /// Records analytics-relevant notifications without cloning ignored variants.
+    pub fn track_notification(&self, notification: &ServerNotification) {
         if !matches!(
             notification,
-            ServerNotification::TurnStarted(_)
+            ServerNotification::ThreadArchived(_)
+                | ServerNotification::ThreadClosed(_)
+                | ServerNotification::ThreadUnarchived(_)
+                | ServerNotification::TurnStarted(_)
                 | ServerNotification::TurnCompleted(_)
                 | ServerNotification::TurnDiffUpdated(_)
                 | ServerNotification::ItemStarted(_)
@@ -548,14 +706,14 @@ impl AnalyticsEventsClient {
         ) {
             return;
         }
-        self.record_fact(AnalyticsFact::Notification(Box::new(notification)));
+        self.record_fact(AnalyticsFact::Notification(Box::new(notification.clone())));
     }
 }
 
 async fn send_track_events(
     auth_manager: &AuthManager,
     destination: &AnalyticsEventsDestination,
-    events: Vec<TrackEventRequest>,
+    mut events: Vec<TrackEventRequest>,
 ) {
     if events.is_empty() {
         return;
@@ -564,7 +722,12 @@ async fn send_track_events(
     let Some(auth) = auth_manager.auth().await else {
         return;
     };
-    if !auth.uses_codex_backend() {
+    if auth.is_api_key_auth() {
+        events.retain(TrackEventRequest::can_send_with_api_key_auth);
+    } else if !auth.uses_codex_backend() {
+        return;
+    }
+    if events.is_empty() {
         return;
     }
 

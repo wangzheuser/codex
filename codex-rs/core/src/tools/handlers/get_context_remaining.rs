@@ -36,7 +36,7 @@ impl GetContextRemainingOutput {
 }
 
 impl ToolOutput for GetContextRemainingOutput {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         self.fragment()
     }
 
@@ -82,7 +82,7 @@ impl ToolExecutor<ToolInvocation> for GetContextRemainingHandler {
             .await;
 
             Ok(boxed_tool_output(GetContextRemainingOutput::new(
-                token_status.tokens_until_compaction,
+                token_status.base_window_tokens_remaining,
             )))
         })
     }
