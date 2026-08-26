@@ -394,6 +394,7 @@ Write-Step "Using Codex home for codex-dev: $devHome"
 $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) "codex-dev-package-$([guid]::NewGuid().ToString('N'))"
 try {
     Write-Step "Building canonical Codex package with Cargo profile: $Profile"
+    $env:CODEX_REPO_ROOT = $repoRoot
     & $pythonPath $packageBuilder `
         --package-dir $stageRoot `
         --cargo $cargoPath `
