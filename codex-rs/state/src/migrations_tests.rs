@@ -1,7 +1,12 @@
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
+#[cfg(windows)]
+use sqlx::AssertSqlSafe;
+#[cfg(windows)]
 use sqlx::Connection;
 use sqlx::Row;
+#[cfg(windows)]
+use sqlx::SqlSafeStr;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 use std::borrow::Cow;
@@ -9,10 +14,133 @@ use std::borrow::Cow;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
 use super::repair_legacy_recency_migration_version;
+#[cfg(windows)]
+use super::repair_line_ending_migration_checksums;
+#[cfg(windows)]
+use super::runtime_state_migrator;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
 
 const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
+
+#[cfg(windows)]
+fn with_crlf_line_endings(sql: &str) -> String {
+    sql.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn runtime_migrator_uses_crlf_migration_checksums() {
+    let source = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 1)
+        .expect("initial state migration should exist");
+    let runtime = runtime_state_migrator();
+    let runtime_migration = runtime
+        .migrations
+        .iter()
+        .find(|migration| migration.version == source.version)
+        .expect("runtime state migration should exist");
+    let expected = Migration::new(
+        source.version,
+        source.description.clone(),
+        source.migration_type,
+        AssertSqlSafe(with_crlf_line_endings(source.sql.as_str())).into_sql_str(),
+        source.no_tx,
+    );
+
+    assert_ne!(source.checksum, expected.checksum);
+    assert_eq!(runtime_migration.checksum, expected.checksum);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn repairs_lf_migration_checksums_before_runtime_migration() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("database should open");
+    migrator_through(/*version*/ 1)
+        .run(&pool)
+        .await
+        .expect("source migration should apply");
+    let runtime = runtime_state_migrator();
+
+    repair_line_ending_migration_checksums(&pool, &runtime)
+        .await
+        .expect("line-ending checksum repair should succeed");
+    runtime
+        .run(&pool)
+        .await
+        .expect("runtime migration should validate repaired checksum");
+
+    let stored_checksum =
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+            .bind(1_i64)
+            .fetch_one(&pool)
+            .await
+            .expect("stored migration checksum should load");
+    let runtime_checksum = runtime
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 1)
+        .expect("runtime migration should exist")
+        .checksum
+        .to_vec();
+    assert_eq!(stored_checksum, runtime_checksum);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn current_crlf_checksum_repair_does_not_need_the_writer_slot() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("database should open");
+    let runtime = runtime_state_migrator();
+    runtime
+        .run(&pool)
+        .await
+        .expect("runtime migrations should apply");
+    let read_pool = sqlite
+        .open_read_only_pool(&state_path, /*busy_timeout*/ None)
+        .await
+        .expect("read-only pool should open");
+    let mut write_connection = pool.acquire().await.expect("write connection should open");
+    let write_transaction = write_connection
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("write transaction should acquire the writer slot");
+
+    let repair_result = repair_line_ending_migration_checksums(&read_pool, &runtime).await;
+
+    write_transaction
+        .rollback()
+        .await
+        .expect("write transaction should roll back");
+    drop(write_connection);
+    read_pool.close().await;
+    pool.close().await;
+    repair_result.expect("current CRLF checksums should not need the writer slot");
+}
 
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
