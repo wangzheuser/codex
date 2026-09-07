@@ -562,9 +562,7 @@ impl TestCodexBuilder {
             Some(home) => home,
             None => Arc::new(TempDir::new()?),
         };
-        let base_url_clone = base_url.clone();
         self.config_mutators.push(Box::new(move |config| {
-            config.model_provider.base_url = Some(base_url_clone);
             config.model_provider.supports_websockets = true;
             config.experimental_realtime_ws_model = Some("realtime-test-model".to_string());
             config.realtime.version = RealtimeWsVersion::V1;
@@ -704,6 +702,7 @@ impl TestCodexBuilder {
             Arc::clone(&self.extensions),
             user_instructions_provider,
             /*analytics_events_client*/ None,
+            codex_core::passthrough_image_store(),
             Arc::clone(&thread_store),
             codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,

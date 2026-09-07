@@ -8,3 +8,5 @@ codex-rs/state/migrations/*.sql text eol=lf
 codex-rs/state/logs_migrations/*.sql text eol=lf
 codex-rs/state/goals_migrations/*.sql text eol=lf
 codex-rs/state/memory_migrations/*.sql text eol=lf
+
+third_party/voice/sources.json text eol=lf

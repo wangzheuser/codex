@@ -7,7 +7,6 @@ use codex_core::find_thread_path_by_id_str;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_login::CodexAuth;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
@@ -209,7 +208,7 @@ async fn review_op_emits_lifecycle_and_review_output() {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .find_map(|line| {
-            let rollout_line: RolloutLine = serde_json::from_str(line).expect("rollout line");
+            let rollout_line = codex_rollout::parse_rollout_line(line).expect("rollout line");
             match rollout_line.item {
                 RolloutItem::SessionMeta(session_meta) => Some(session_meta.meta.id.to_string()),
                 _ => None,
@@ -251,7 +250,7 @@ async fn review_op_emits_lifecycle_and_review_output() {
             continue;
         }
         let v: serde_json::Value = serde_json::from_str(line).expect("jsonl line");
-        let rl: RolloutLine = serde_json::from_value(v).expect("rollout line");
+        let rl = codex_rollout::decode_rollout_line(v).expect("rollout line");
         if let RolloutItem::ResponseItem(envelope) = rl.item
             && let ResponseItem::Message { role, content, .. } = envelope.item
         {
@@ -582,6 +581,8 @@ async fn review_uses_updated_turn_permissions_and_approval_policy() {
 
     fn model_defaults(guidance_message: &str) -> ModelTokenBudgetConfig {
         ModelTokenBudgetConfig {
+            enabled: false,
+            use_history_notes_extension: false,
             reminder_threshold_tokens: 6_144,
             reminder_message_template: "Reminder: {n_remaining} tokens remain.".to_string(),
             guidance_message: guidance_message.to_string(),
@@ -761,8 +762,8 @@ async fn review_uses_updated_turn_permissions_and_approval_policy() {
     let review_session_cwd = review_rollout
         .lines()
         .find_map(|line| {
-            let rollout_line: RolloutLine =
-                serde_json::from_str(line).expect("review rollout line should be valid");
+            let rollout_line = codex_rollout::parse_rollout_line(line)
+                .expect("review rollout line should be valid");
             match rollout_line.item {
                 RolloutItem::SessionMeta(session_meta) => Some(session_meta.meta.cwd),
                 _ => None,
@@ -773,8 +774,8 @@ async fn review_uses_updated_turn_permissions_and_approval_policy() {
     let review_context = review_rollout
         .lines()
         .filter_map(|line| {
-            let rollout_line: RolloutLine =
-                serde_json::from_str(line).expect("review rollout line should be valid");
+            let rollout_line = codex_rollout::parse_rollout_line(line)
+                .expect("review rollout line should be valid");
             match rollout_line.item {
                 RolloutItem::TurnContext(turn_context) => Some(turn_context),
                 _ => None,
@@ -1012,7 +1013,7 @@ async fn review_uses_custom_review_model_from_config() {
 }
 
 /// Ensure that when `review_model` is not set in the config, the review request
-/// uses the session model.
+/// uses the session model without exposing disabled clock tools or reminders.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_uses_session_model_when_review_model_unset() {
     skip_if_no_network!();
@@ -1025,7 +1026,7 @@ async fn review_uses_session_model_when_review_model_unset() {
         .with_config(|config| {
             config.model = Some("gpt-5.4".to_string());
             config.review_model = None;
-            config.model_reasoning_effort = Some(ReasoningEffort::Max);
+            config.model_reasoning_effort = Some(ReasoningEffort::Persistent);
         })
         .build_with_auto_env(&server)
         .await
@@ -1061,7 +1062,12 @@ async fn review_uses_session_model_when_review_model_unset() {
     assert_eq!(request.path(), "/v1/responses");
     let body = request.body_json();
     assert_eq!(body["model"].as_str().unwrap(), "gpt-5.4");
-    assert_eq!(body["reasoning"]["effort"].as_str(), Some("max"));
+    assert_eq!(body["reasoning"]["effort"].as_str(), Some("disabled"));
+    assert_eq!(
+        ["curr_time", "sleep"].map(|name| request.tool_by_name("clock", name).is_some()),
+        [false, false]
+    );
+    assert!(!request.has_content_kinds(&["current_time.reminder"]));
 
     let _codex_home_guard = codex_home;
     server.verify().await;
@@ -1222,7 +1228,7 @@ async fn review_input_isolated_from_parent_history() {
             continue;
         }
         let v: serde_json::Value = serde_json::from_str(line).expect("jsonl line");
-        let rl: RolloutLine = serde_json::from_value(v).expect("rollout line");
+        let rl = codex_rollout::decode_rollout_line(v).expect("rollout line");
         if let RolloutItem::ResponseItem(envelope) = rl.item
             && let ResponseItem::Message { role, content, .. } = envelope.item
             && role == "user"
